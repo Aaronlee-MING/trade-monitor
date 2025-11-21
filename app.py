@@ -26,16 +26,18 @@ SILICON_KEY = "sk-lvnzrlhumujjhpzjkslhhuqjdukioscebcoeuawumtyqoqiz"
 API_URL = "https://api.siliconflow.cn/v1/chat/completions"
 MODEL_NAME = "deepseek-ai/DeepSeek-V3"
 
-# 媒体源专用关键词 (VIP源全量抓取，不使用此表)
+# --- 策略调整：扩充媒体关键词（不再过于严格，防止漏抓） ---
 MEDIA_KEYWORDS = [
-    "Sanction", "Export Control", "Entity List", "SDN", "Tariff", 
-    "Semiconductor", "Chip", "Blacklist", "Laundering", "Ban", "Restriction",
-    "制裁", "出口管制", "实体清单", "关税", "半导体", "芯片", "黑名单", "洗钱"
+    "Sanction", "Export", "Import", "Trade", "Entity List", "Tariff", 
+    "Semiconductor", "Chip", "Tech", "Supply Chain", "Investment", 
+    "Blacklist", "Laundering", "Ban", "Restriction", "Investigation",
+    "Enforcement", "Violation", "China", "Russia", "Policy",
+    "制裁", "出口", "进口", "贸易", "清单", "关税", "芯片", "半导体", "供应链"
 ]
 
 # 站点配置
 DEFAULT_SITES = [
-    # VIP: 核心政府源 (全抓 + 严审)
+    # VIP: 核心政府源 (全量抓取 + AI 去除非业务信息)
     {"name": "🇺🇸 BIS News", "url": "https://www.bis.gov/news-updates", "engine": "curl", "type": "vip"},
     {"name": "🇺🇸 OFAC Actions", "url": "https://ofac.treasury.gov/recent-actions", "engine": "curl", "type": "vip"},
     {"name": "🇺🇸 Commerce Press", "url": "https://www.commerce.gov/news/press-releases", "engine": "curl", "type": "vip"},
@@ -45,7 +47,7 @@ DEFAULT_SITES = [
     {"name": "🇨🇳 外交部发言人", "url": "https://www.fmprc.gov.cn/fyrbt_673021/", "engine": "standard", "type": "vip"},
     {"name": "🇺🇸 BIS Enforcement", "url": "https://www.bis.gov/enforcement/export-violations", "engine": "curl", "type": "vip"},
     
-    # Media: 泛读源 (关键词抓 + 严审)
+    # Media: 泛读源 (扩充关键词抓取 + AI 严格关联度审核)
     {"name": "🇬🇧 Reuters (Defense)", "url": "https://www.reuters.com/business/aerospace-defense/", "engine": "curl", "type": "media"},
     {"name": "🏛️ CSIS Analysis", "url": "https://www.csis.org/analysis", "engine": "curl", "type": "media"},
     {"name": "🇺🇸 US Congress", "url": "https://www.congress.gov/search?q=%7B%22source%22%3A%22legislation%22%2C%22congress%22%3A%22118%22%7D", "engine": "curl", "type": "media"},
@@ -53,7 +55,7 @@ DEFAULT_SITES = [
     {"name": "📰 Foreign Policy", "url": "https://foreignpolicy.com/latest/", "engine": "curl", "type": "media"}
 ]
 
-# ================= 🎨 UI 设计 (律所专业版 - 强制清晰) =================
+# ================= 🎨 UI 设计 (律所专业版) =================
 
 st.set_page_config(page_title="Trade Compliance Monitor", page_icon="⚖️", layout="wide")
 
@@ -92,11 +94,15 @@ def get_target_dates(selected_date, report_type, include_tz):
     return dates
 
 def normalize_title(title):
-    """标题去重指纹：去标点、转小写"""
+    """标题指纹去重：去除标点、转小写、去除首尾空格"""
     return re.sub(r'[^\w\s]', '', title).lower().strip()
 
 def fetch_links_step(site):
-    """采集阶段"""
+    """
+    步骤1: 采集
+    VIP: 抓取所有链接 (不漏)
+    Media: 抓取包含扩充关键词的链接 (不过度严格)
+    """
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
         html = ""
@@ -121,10 +127,10 @@ def fetch_links_step(site):
             if t and len(t)>8 and h and "javascript" not in h:
                 full = urljoin(site['url'], h)
                 
-                # VIP源：全抓
+                # VIP源：全量抓取，后续由 AI 判断是否为“行政噪音”
                 if site['type'] == 'vip':
                     links.append((site['name'], t, full, site['engine'], site['type']))
-                # 媒体源：必须包含强关键词
+                # Media源：使用扩充后的关键词库
                 else:
                     if any(k.lower() in t.lower() for k in MEDIA_KEYWORDS):
                         links.append((site['name'], t, full, site['engine'], site['type']))
@@ -132,7 +138,10 @@ def fetch_links_step(site):
     except: return []
 
 def analyze_article_final(item, target_date_objs):
-    """分析阶段：Prompt 防火墙"""
+    """
+    步骤2: AI 深度审核
+    功能：日期核查 + 内容相关性核查 + 格式化输出
+    """
     site_name, title, url, engine, site_type = item
     try:
         # 1. 获取正文
@@ -146,47 +155,61 @@ def analyze_article_final(item, target_date_objs):
             txt = r.text
         
         soup = BeautifulSoup(txt, 'html.parser')
-        # 彻底移除干扰项
-        for s in soup(["script", "style", "nav", "footer", "aside", "header", "div.related", "div.sidebar"]): s.extract()
-        raw_text = soup.get_text(separator="\n", strip=True)[:3500]
+        # 强力清洗：去除侧边栏、推荐阅读、页脚，防止日期混淆
+        for s in soup(["script", "style", "nav", "footer", "aside", "header", "div.related", "div.sidebar", "div.menu"]): s.extract()
+        raw_text = soup.get_text(separator="\n", strip=True)[:4000]
         if len(raw_text) < 50: return None
 
         # 2. 构造日期约束
-        date_list_str = ", ".join([d.strftime("%Y-%m-%d") for d in target_date_objs])
+        date_range_str = ", ".join([d.strftime("%Y-%m-%d") for d in target_date_objs])
         
-        # 3. 构造 Prompt
+        # 3. 构造分级 Prompt
         if site_type == 'vip':
-            role_desc = "核心政府网站。只要日期符合，内容涉及政策/执法/声明，一律保留。"
+            # VIP 策略：去除行政噪音
+            role_desc = """
+            这是核心政府/监管网站。
+            【保留】：法规更新、制裁行动、官方声明、政策解读。
+            【剔除】：网站维护通知、休假通知、招聘信息、无实质内容的会议议程。
+            只要是实质性内容，必须保留。
+            """
         else:
-            role_desc = "媒体新闻。必须与【制裁、实体清单、出口管制】强相关。普通外交/泛政治新闻直接剔除。"
+            # Media 策略：相关性清洗
+            role_desc = """
+            这是大众媒体新闻。
+            【保留】：涉及“制裁、实体清单、出口管制、关税、供应链禁令”的实质性报道。
+            【剔除】：普通的外交辞令、泛政治新闻、无贸易背景的军事冲突。
+            必须强相关。
+            """
 
-        system_prompt = "你是一个只会输出简报的机器人。不要输出任何问候语，不要输出你的思考过程，不要输出Prompt本身。"
+        system_prompt = "你是一个只输出最终简报的机器人。严禁输出思考过程，严禁输出Prompt本身，严禁输出Markdown代码块标记。"
         
         user_prompt = f"""
         任务：贸易合规简报生成。
         
-        【步骤1：日期核查】
-        目标日期列表：[{date_list_str}]
-        请在正文中寻找发布日期（忽略侧边栏/推荐阅读）。
-        如果正文日期不在目标列表中，输出 "MISMATCH"。
+        【步骤1：日期核查 (Critical)】
+        目标日期列表：[{date_range_str}]
+        请仔细在正文中寻找发布日期 (Published/Updated Date)。
+        ⚠️ 忽略“推荐阅读”或页脚版权信息中的日期。
+        如果正文日期不在目标列表中，直接输出 "MISMATCH"。
         
         【步骤2：内容核查】
+        文章标题：{title}
         {role_desc}
-        如果不符，输出 "MISMATCH"。
+        如果内容属于【剔除】类别，直接输出 "MISMATCH"。
         
         【步骤3：输出结果】
-        如果符合，请严格按以下格式输出（纯文本，无Markdown标记）：
+        如果符合要求，请严格按以下格式输出纯文本：
         
         【日期】YYYY-MM-DD
         【标题】(中文翻译)
-        【核心事实】(3点摘要)
-        【合规提示】(风险建议)
+        【核心事实】(3点摘要，客观陈述)
+        【合规提示】(针对企业的风险建议)
         
         ---
         待分析文本：
         来源：{site_name}
         标题：{title}
-        内容：{raw_text}
+        内容摘要：{raw_text}
         """
         
         res = requests.post(
@@ -198,7 +221,7 @@ def analyze_article_final(item, target_date_objs):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ], 
-                "temperature": 0.1
+                "temperature": 0.1 # 低温，保证严谨
             },
             timeout=35
         )
@@ -206,16 +229,13 @@ def analyze_article_final(item, target_date_objs):
         if res.status_code == 200:
             ai_reply = res.json()['choices'][0]['message']['content']
             
-            # 后处理：防止 AI 还是输出了 Prompt 或 Markdown
-            if "MISMATCH" in ai_reply: return None
+            # 后处理：防止 AI 幻觉或格式错误
+            if "MISMATCH" in ai_reply or len(ai_reply) < 10: return None
             
-            # 清洗：去掉 ```markdown, ```, 以及可能包含的 "Here is the report"
+            # 清洗：去掉 ```markdown, ```, 以及可能的 "Here is the summary"
+            # 使用正则只保留 【日期】... 之后的内容
             clean_reply = ai_reply.replace("```markdown", "").replace("```", "").strip()
-            # 再次确保开头是【日期】
-            if "【日期】" not in clean_reply:
-                # 如果 AI 没按格式输出，尝试强行提取或丢弃（这里选择返回原始内容，因为内容可能是好的）
-                pass
-                
+            
             return {"source": site_name, "url": url, "content": clean_reply, "type": site_type}
     except: pass
     return None
@@ -234,12 +254,16 @@ def main():
         
         st.divider()
         # 自定义源
-        with st.expander("➕ 添加数据源"):
-            new_name = st.text_input("名称", placeholder="例: US State Dept")
+        with st.expander("➕ 添加自定义源"):
+            new_name = st.text_input("名称", placeholder="例: EU Commission")
             new_url = st.text_input("URL", placeholder="https://...")
+            new_type = st.selectbox("类型", ["vip (全量审)", "media (关键词审)"])
             if st.button("添加"):
                 if new_name and new_url:
-                    st.session_state.custom_sites.append({"name": new_name, "url": new_url, "engine": "curl", "type": "vip"})
+                    st.session_state.custom_sites.append({
+                        "name": new_name, "url": new_url, 
+                        "engine": "curl", "type": "vip" if "vip" in new_type else "media"
+                    })
                     st.success("已添加")
         
         st.divider()
@@ -250,7 +274,7 @@ def main():
         run = st.button("开始检索", type="primary", use_container_width=True)
 
     st.markdown('<div class="main-header">Trade Compliance Monitor</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="sub-header">律师专业版 v32.0 (最终交付) | 模式：{report_type}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sub-header">律师专业版 v33.0 (平衡智能版) | 模式：{report_type}</div>', unsafe_allow_html=True)
 
     if run:
         st.session_state.results = []
@@ -259,7 +283,7 @@ def main():
         status = st.status("🚀 启动系统...", expanded=True)
         status.write(f"📅 锁定日期: {[d.strftime('%Y-%m-%d') for d in target_date_objs]}")
         
-        # 1. 采集 (15线程)
+        # 1. 采集 (15线程高并发)
         all_raw = []
         target_sites_objs = [s for s in all_sites if s['name'] in sites_selected]
         
@@ -269,32 +293,34 @@ def main():
                 links = f.result()
                 if links:
                     all_raw.extend(links)
-                    status.write(f"✅ {futures[f]}: 捕获 {len(links)} 条线索")
+                    status.write(f"✅ {futures[f]}: 捕获 {len(links)} 条潜在线索")
         
-        # 2. 严格去重 (URL + 标题指纹)
+        # 2. 全局去重 (URL + 标题指纹)
         unique = []
         seen_urls = set()
         seen_titles = set()
         
         for item in all_raw:
+            # item: (site, title, url, engine, type)
             title_clean = normalize_title(item[1])
             url = item[2]
             
-            if url in seen_urls: continue # URL 重复
-            if len(title_clean) > 8 and title_clean in seen_titles: continue # 标题重复
+            if url in seen_urls: continue
+            # 标题指纹去重：防止 DOJ 这种同一内容发多条链接的情况
+            if len(title_clean) > 8 and title_clean in seen_titles: continue
             
             seen_urls.add(url)
             seen_titles.add(title_clean)
             unique.append(item)
         
         dup_count = len(all_raw) - len(unique)
-        if dup_count > 0: status.write(f"✂️ 已自动剔除 {dup_count} 条重复/相似内容")
+        if dup_count > 0: status.write(f"✂️ 已剔除 {dup_count} 条重复内容")
 
         if not unique:
             status.update(label="无结果", state="error")
-            st.warning("未发现线索。请检查日期或添加自定义源。")
+            st.warning("今日无相关更新。")
         else:
-            status.write(f"🧠 AI 深度审核中 ({len(unique)} 条任务)...")
+            status.write(f"🧠 AI 深度核查中 ({len(unique)} 条任务)...")
             result_container = st.container()
             
             # 3. 分析 (15线程)
@@ -320,9 +346,9 @@ def main():
             
             if found_count == 0:
                 status.update(label="检索完成：无有效情报", state="complete")
-                st.info("AI 判定抓取内容均为旧闻或无关。")
+                st.info("经 AI 核查，线索均为旧闻、重复或非实质性内容（如放假通知/无关外交新闻）。")
             else:
-                status.update(label=f"✅ 检索完成：锁定 {found_count} 条情报", state="complete", expanded=False)
+                status.update(label=f"✅ 检索完成：锁定 {found_count} 条高质量情报", state="complete", expanded=False)
 
     elif st.session_state.results:
         for res in st.session_state.results:
