@@ -4,3 +4,4 @@ beautifulsoup4
 curl_cffi
 pandas
 urllib3
+pypdf
