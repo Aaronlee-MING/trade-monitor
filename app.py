@@ -2,23 +2,25 @@ import streamlit as st
 import requests
 import time
 import re
-import random
 import warnings
-import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from datetime import timedelta, datetime
 
 # 引入穿墙库
-from curl_cffi import requests as c_requests
+try:
+    from curl_cffi import requests as c_requests
+except ImportError:
+    # 兼容本地未安装的情况
+    import requests as c_requests
 
 # SSL设置
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings("ignore")
 
-# ================= ⚙️ 核心配置 (已固化) =================
+# ================= ⚙️ 核心配置 =================
 
 SILICON_KEY = "sk-lvnzrlhumujjhpzjkslhhuqjdukioscebcoeuawumtyqoqiz" 
 API_URL = "https://api.siliconflow.cn/v1/chat/completions"
@@ -51,78 +53,80 @@ SITES = [
 # ================= 🎨 页面 UI 设置 =================
 
 st.set_page_config(
-    page_title="Global Trade Intelligence",
+    page_title="全球贸易合规情报雷达",
     page_icon="🌍",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# 自定义 CSS 美化
 st.markdown("""
 <style>
-    .block-container {padding-top: 2rem; padding-bottom: 2rem;}
-    h1 {font-family: 'Helvetica', sans-serif; color: #0e1117;}
-    .stButton>button {width: 100%; border-radius: 5px; font-weight: bold;}
     .report-card {
-        background-color: #f9f9f9;
+        background-color: #ffffff;
         padding: 20px;
-        border-radius: 10px;
-        border-left: 5px solid #4e8cff;
+        border-radius: 8px;
+        border: 1px solid #e0e0e0;
+        border-left: 5px solid #FF4B4B;
         margin-bottom: 15px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
     .tag {
-        display: inline-block;
+        background-color: #f0f2f6;
         padding: 2px 8px;
         border-radius: 4px;
         font-size: 12px;
-        font-weight: bold;
-        margin-right: 5px;
+        color: #31333F;
+        font-weight: 600;
+        margin-right: 10px;
     }
-    .tag-date {background-color: #e0e0e0; color: #333;}
-    .tag-source {background-color: #d1e7dd; color: #0f5132;}
 </style>
 """, unsafe_allow_html=True)
 
 # ================= 🧠 后端逻辑函数 =================
 
-def generate_date_keywords(selected_date, report_type):
+def generate_strict_date_keywords(selected_date, report_type, include_timezone):
     """
-    (Version 2.0 精准版) 
-    根据用户选择生成日期关键词，强制包含年份，防止抓到旧新闻。
+    (核心修复) 生成严格带年份的日期格式
     """
     dates_to_check = []
     
+    # 1. 确定日期范围
     if report_type == "日报 (Daily)":
-        # 选中日期 + 前一天 (考虑时差)
-        dates_to_check = [selected_date, selected_date - timedelta(days=1)]
+        dates_to_check = [selected_date]
+        if include_timezone:
+            # 如果勾选时差，多查一天（比如查21号，同时也查美国的20号）
+            dates_to_check.append(selected_date - timedelta(days=1))
+            
     elif report_type == "周报 (Weekly)":
-        # 过去7天
         dates_to_check = [selected_date - timedelta(days=i) for i in range(8)]
     elif report_type == "月报 (Monthly)":
-        # 过去30天
         dates_to_check = [selected_date - timedelta(days=i) for i in range(31)]
     
+    # 2. 生成严格格式 (必须包含年份)
     keywords = []
-    year_str = str(selected_date.year) # 获取选中的年份，如 "2025"
-    
     for d in dates_to_check:
-        # 强制带年份的格式
-        keywords.extend([
-            d.strftime("%B %d, %Y"),      # November 21, 2025 (最常见标准格式)
-            d.strftime("%b %d, %Y"),      # Nov 21, 2025
-            d.strftime("%b. %d, %Y"),     # Nov. 21, 2025
-            d.strftime("%Y-%m-%d"),       # 2025-11-21
-            d.strftime("%Y/%m/%d"),       # 2025/11/21
-            d.strftime("%d/%m/%Y"),       # 21/11/2025
-            d.strftime("%d %B %Y"),       # 21 November 2025 (欧盟常用)
-            f"{d.strftime('%B %d')}, {year_str}" # 手动补漏
-        ])
+        year = str(d.year)
+        day_no_pad = str(d.day) # 不带0的日期 (5号)
+        day_pad = d.strftime("%d") # 带0的日期 (05号)
+        
+        month_full = d.strftime("%B") # November
+        month_abbr = d.strftime("%b") # Nov
+        
+        # 组合各种官方写法
+        formats = [
+            d.strftime("%B %d, %Y"),       # November 21, 2025 (BIS/OFAC 标准)
+            d.strftime("%b %d, %Y"),       # Nov 21, 2025
+            d.strftime("%b. %d, %Y"),      # Nov. 21, 2025
+            d.strftime("%Y-%m-%d"),        # 2025-11-21 (MOFCOM/ISO)
+            d.strftime("%d %B %Y"),        # 21 November 2025 (EU/Reuters)
+            f"{month_full} {day_no_pad}, {year}", # November 5, 2025 (去零)
+            f"{month_abbr} {day_no_pad}, {year}", # Nov 5, 2025 (去零)
+            d.strftime("%m/%d/%Y"),        # 11/21/2025 (US Short)
+        ]
+        keywords.extend(formats)
     
     return list(set(keywords))
 
 def fetch_links_hybrid(site):
-    """混合引擎抓取列表"""
     url = site['url']
     try:
         if site['engine'] == "standard":
@@ -131,13 +135,12 @@ def fetch_links_hybrid(site):
             if "mofcom" in url: resp.encoding = "utf-8" if "charset=utf-8" in resp.text.lower() else "gbk"
             if resp.status_code == 200: return parse_links(resp.text, url)
         else:
-            # 穿墙模式
             for fp in ["chrome120", "safari15_3", "edge101"]:
                 try:
                     resp = c_requests.get(url, impersonate=fp, timeout=15)
                     if resp.status_code == 200: return parse_links(resp.text, url)
                 except: continue
-    except Exception: pass
+    except: pass
     return []
 
 def parse_links(html, base_url):
@@ -155,7 +158,9 @@ def parse_links(html, base_url):
     return data
 
 def analyze_news_item(url, title, site_name, engine, date_keywords):
-    """详情页分析"""
+    """
+    详情页分析：只有找到严格匹配的日期字符串才返回
+    """
     try:
         page_text = ""
         if engine == "standard":
@@ -166,32 +171,42 @@ def analyze_news_item(url, title, site_name, engine, date_keywords):
             resp = c_requests.get(url, impersonate="chrome120", timeout=10)
             page_text = resp.text
             
-        # 日期检查
+        # === 严格日期匹配 ===
         found_date = None
         for dk in date_keywords:
+            # 检查页面中是否存在这个精确的日期字符串
             if dk in page_text:
                 found_date = dk
                 break
-        if not found_date: return None
+        
+        if not found_date: 
+            return None
         
         # 提取正文
         soup = BeautifulSoup(page_text, 'html.parser')
+        # 移除脚本和样式
+        for script in soup(["script", "style", "nav", "footer"]):
+            script.extract()
+            
         content = "\n".join([p.get_text(strip=True) for p in soup.find_all('p') if len(p.get_text(strip=True)) > 50])
         if len(content) < 50: return None
         
-        # AI 总结
         return call_ai_api(content[:3000], title, site_name, found_date, url)
     except: return None
 
 def call_ai_api(content, title, source, date_str, url):
     prompt = f"""
-    你是一名国际贸易合规专家。来源：{source}，标题：{title}。
+    你是一名国际贸易合规专家。
+    来源：{source}
+    原文标题：{title}
+    发布日期：{date_str}
+    
     任务：翻译并总结为中文简报。
-    格式要求（不要Markdown代码块）：
+    格式要求（纯文本，不要Markdown代码块）：
     日期：{date_str}
     标题：(中文标题)
-    核心事实：(简练概括)
-    合规提示：(对企业的建议)
+    核心事实：(3句话概括，包含主体、行为、后果)
+    合规提示：(对中国企业的具体建议)
     
     正文：{content}
     """
@@ -210,125 +225,87 @@ def call_ai_api(content, title, source, date_str, url):
 # ================= 🖥️ 前端交互逻辑 =================
 
 def main():
-    # 初始化 Session State
     if 'results' not in st.session_state:
         st.session_state.results = []
-    if 'is_running' not in st.session_state:
-        st.session_state.is_running = False
 
-    # --- 侧边栏 ---
     with st.sidebar:
-        st.title("🕹️ 控制台")
-        st.write("---")
+        st.title("🔍 检索配置")
+        report_type = st.radio("报告类型", ["日报 (Daily)", "周报 (Weekly)", "月报 (Monthly)"])
+        selected_date = st.date_input("选择日期", datetime.now())
         
-        report_type = st.radio("📊 选择报告类型", ["日报 (Daily)", "周报 (Weekly)", "月报 (Monthly)"])
+        # 新增：时差开关
+        include_timezone = st.checkbox("包含美国时差 (自动查前一天)", value=True, help="因为美国比亚洲晚半天，查今天的新闻通常需要包含美国的'昨天'。")
         
-        selected_date = st.date_input("📅 选择基准日期", datetime.now())
+        st.divider()
+        selected_sites_names = st.multiselect("扫描范围", [s['name'] for s in SITES], default=[s['name'] for s in SITES])
         
-        st.write("---")
-        st.write("📡 监控站点")
-        selected_sites_names = st.multiselect(
-            "选择要扫描的来源:",
-            [s['name'] for s in SITES],
-            default=[s['name'] for s in SITES]
-        )
-        
-        st.write("---")
-        run_btn = st.button("🚀 开始生成情报", type="primary", disabled=st.session_state.is_running)
+        run_btn = st.button("🚀 开始精确检索", type="primary")
 
-    # --- 主界面 ---
     st.title("🌍 全球贸易合规情报雷达")
-    st.caption(f"基于 DeepSeek-V3 模型 | 当前目标: {report_type} - {selected_date}")
     
-    # 运行逻辑
     if run_btn:
-        st.session_state.results = [] # 清空旧结果
-        st.session_state.is_running = True
+        st.session_state.results = []
         
-        # 1. 生成日期关键词
-        date_keywords = generate_date_keywords(selected_date, report_type)
-        st.info(f"正在检索以下日期范围的内容: {date_keywords[:3]}... 等 ({len(date_keywords)}个格式)")
+        # 1. 生成精准日期关键词
+        date_keywords = generate_strict_date_keywords(selected_date, report_type, include_timezone)
         
-        # 2. 筛选站点
+        st.success(f"📅 已锁定 {len(date_keywords)} 个精准日期格式 (例如: {date_keywords[0]})")
+        if include_timezone and report_type == "日报 (Daily)":
+            st.caption(f"正在同时扫描: {selected_date} 和 {selected_date - timedelta(days=1)}")
+        
         target_sites = [s for s in SITES if s['name'] in selected_sites_names]
-        
-        # 3. 进度条容器
         progress_bar = st.progress(0)
         status_text = st.empty()
         result_container = st.container()
         
-        total_sites = len(target_sites)
-        
-        # 4. 开始扫描
         for i, site in enumerate(target_sites):
             status_text.markdown(f"### 📡 正在扫描: **{site['name']}** ...")
-            
-            # 抓取链接
             links = fetch_links_hybrid(site)
             
-            # 关键词过滤
             relevant_links = []
             for title, url in links:
                 if any(k.lower() in title.lower() for k in KEYWORDS):
                     relevant_links.append((title, url))
             
             if relevant_links:
-                status_text.markdown(f"🔍 {site['name']}: 发现 {len(relevant_links)} 条潜在情报，AI 正在研判...")
+                status_text.markdown(f"🔍 {site['name']}: 标题命中 {len(relevant_links)} 条，正在核对日期...")
                 
-                # 并发分析
                 with ThreadPoolExecutor(max_workers=5) as executor:
                     futures = {executor.submit(analyze_news_item, url, title, site['name'], site['engine'], date_keywords): url for title, url in relevant_links}
                     
                     for future in as_completed(futures):
                         res = future.result()
                         if res:
-                            # 解析结果并存入 State
-                            item = {
-                                "source": site['name'],
-                                "url": futures[future],
-                                "content": res
-                            }
+                            item = {"source": site['name'], "url": futures[future], "content": res}
                             st.session_state.results.append(item)
-                            # 实时显示
                             with result_container:
-                                with st.expander(f"🚨 {site['name']} | 新情报发现!", expanded=True):
+                                with st.expander(f"🚨 {site['name']} | {item['url']}", expanded=True):
                                     st.markdown(res)
-                                    st.markdown(f"[🔗 点击查看原文]({futures[future]})")
             
-            # 更新进度
-            progress_bar.progress((i + 1) / total_sites)
+            progress_bar.progress((i + 1) / len(target_sites))
             
-        st.session_state.is_running = False
-        status_text.success("✅ 扫描完成！")
-        time.sleep(1)
-        status_text.empty()
+        status_text.success(f"✅ 扫描完成！共发现 {len(st.session_state.results)} 条精准情报。")
 
-    # --- 结果展示区 (即使刷新页面也能保留) ---
+    # 结果展示
     if st.session_state.results:
         st.divider()
-        st.subheader(f"📝 生成结果 ({len(st.session_state.results)} 条)")
-        
-        # 导出文本按钮
         full_text = ""
         for item in st.session_state.results:
-            full_text += f"\n{'='*40}\n来源：{item['source']}\n{item['content']}\n链接：{item['url']}\n"
-        
-        st.download_button("📥 下载简报 (TXT)", full_text, file_name=f"Trade_Report_{selected_date}.txt")
-
-        # 卡片式展示
-        for item in st.session_state.results:
+            full_text += f"\n{'='*40}\n{item['content']}\n链接：{item['url']}\n"
+            
             st.markdown(f"""
             <div class="report-card">
-                <span class="tag tag-source">{item['source']}</span>
-                <div style="margin-top: 10px; white-space: pre-wrap;">{item['content']}</div>
+                <span class="tag">{item['source']}</span>
+                <div style="margin-top: 10px; white-space: pre-wrap; font-family: sans-serif;">{item['content']}</div>
                 <div style="margin-top: 10px;">
-                    <a href="{item['url']}" target="_blank" style="text-decoration: none; color: #4e8cff; font-weight: bold;">🔗 阅读全文 &rarr;</a>
+                    <a href="{item['url']}" target="_blank" style="text-decoration: none; color: #FF4B4B; font-weight: bold;">🔗 查看原文</a>
                 </div>
             </div>
             """, unsafe_allow_html=True)
-    
-    elif not st.session_state.is_running and run_btn:
-        st.warning("本次扫描未发现符合条件的制裁信息。建议尝试更改日期或报告类型。")
+            
+        st.download_button("📥 导出简报 (TXT)", full_text, file_name=f"Report_{selected_date}.txt")
+    elif run_btn:
+        st.warning(f"在 {selected_date} 未发现符合条件的精准制裁信息。")
 
 if __name__ == "__main__":
     main()
