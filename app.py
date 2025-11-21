@@ -24,7 +24,6 @@ SILICON_KEY = "sk-lvnzrlhumujjhpzjkslhhuqjdukioscebcoeuawumtyqoqiz"
 API_URL = "https://api.siliconflow.cn/v1/chat/completions"
 MODEL_NAME = "deepseek-ai/DeepSeek-V3"
 
-# 关键词
 KEYWORDS = [
     "Sanction", "Trade", "Export", "Import", "Tariff", "Entity List", 
     "China", "Russia", "Control", "Violation", "Security", "Semiconductor",
@@ -32,7 +31,6 @@ KEYWORDS = [
     "制裁", "贸易", "出口", "进口", "关税", "实体清单", "半导体", "芯片", "管制"
 ]
 
-# 站点配置
 SITES = [
     {"name": "🇺🇸 BIS News", "url": "https://www.bis.gov/news-updates", "engine": "curl"},
     {"name": "🇺🇸 OFAC Actions", "url": "https://ofac.treasury.gov/recent-actions", "engine": "curl"},
@@ -48,36 +46,95 @@ SITES = [
     {"name": "📰 Foreign Policy", "url": "https://foreignpolicy.com/latest/", "engine": "curl"}
 ]
 
-# ================= 🎨 UI 样式 (强制高对比度) =================
+# ================= 🎨 UI 设计 (v17 复刻 + 强制清晰度) =================
 
 st.set_page_config(page_title="Trade Compliance Monitor", page_icon="⚖️", layout="wide")
 
-# 这里的 CSS 只负责全局背景和标题，卡片样式全部在 HTML 里写死
 st.markdown("""
 <style>
-    /* 强制全局亮色背景 */
-    .stApp { background-color: #F0F2F6; }
-    
-    /* 标题样式 */
-    .main-title {
-        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
-        color: #1F2937;
-        font-weight: 800;
-        font-size: 2rem;
-        margin-bottom: 0.5rem;
+    /* 1. 全局字体与背景 */
+    .stApp {
+        background-color: #ffffff; 
+        color: #1a202c;
     }
     
-    /* 侧边栏 */
-    [data-testid="stSidebar"] {
-        background-color: #FFFFFF;
-        border-right: 1px solid #E5E7EB;
+    /* 2. 标题设计 - 律所衬线体风格 */
+    .main-header {
+        font-family: "Source Serif Pro", "Georgia", serif;
+        color: #0F294D;
+        font-size: 2.4rem;
+        font-weight: 700;
+        letter-spacing: -0.5px;
+        margin-bottom: 0.5rem;
+    }
+    .sub-header {
+        font-family: "Helvetica Neue", sans-serif;
+        color: #64748b;
+        font-size: 1rem;
+        font-weight: 400;
+        margin-bottom: 2.5rem;
+        border-bottom: 1px solid #e2e8f0;
+        padding-bottom: 1rem;
+    }
+
+    /* 3. 结果卡片 (v17核心设计) */
+    .result-card {
+        background-color: #F7F9FB !important; /* 淡蓝灰信纸色 */
+        border: 1px solid #E2E8F0;
+        border-radius: 8px;
+        padding: 24px;
+        margin-bottom: 20px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+        transition: transform 0.2s;
+    }
+    .result-card:hover {
+        border-color: #cbd5e1;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+    }
+    
+    /* 4. 来源标签 */
+    .source-tag {
+        background-color: #E2E8F0;
+        color: #1e293b !important; /* 强制深色 */
+        padding: 4px 10px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        display: inline-block;
+        margin-bottom: 14px;
+    }
+
+    /* 5. 正文内容 (强制深色，高可读性) */
+    .content-text {
+        color: #1A202C !important; /* 接近纯黑 */
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        font-size: 15px;
+        line-height: 1.7; /* 增加行距 */
+        white-space: pre-wrap;
+    }
+
+    /* 6. 链接按钮 */
+    .link-btn {
+        display: inline-block;
+        margin-top: 18px;
+        color: #2563eb !important;
+        font-weight: 600;
+        text-decoration: none;
+        font-size: 0.9rem;
+        border-bottom: 1px dotted #2563eb;
+    }
+    .link-btn:hover {
+        border-bottom: 1px solid #2563eb;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 🧠 核心逻辑 (并发+严谨清洗) =================
+# ================= 🧠 核心逻辑 (v19 高性能引擎) =================
 
 def generate_dates(selected_date, report_type, include_tz):
+    """生成日期"""
     dates = []
     if report_type == "日报":
         dates = [selected_date]
@@ -102,7 +159,7 @@ def month_num(m_full):
     except: return "00"
 
 def fetch_links_step(site):
-    """步骤1: 快速抓取链接"""
+    """步骤1: 扫描列表 (并发)"""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
         if site['engine'] == "standard":
@@ -132,7 +189,7 @@ def fetch_links_step(site):
     except: return []
 
 def analyze_article_step(item, date_keywords):
-    """步骤2: 深入分析 (并发执行)"""
+    """步骤2: 深度分析 (并发)"""
     site_name, title, url, engine = item
     try:
         if engine == "standard":
@@ -173,8 +230,7 @@ def analyze_article_step(item, date_keywords):
             timeout=25
         )
         if res.status_code == 200:
-            ai_content = res.json()['choices'][0]['message']['content']
-            return {"source": site_name, "url": url, "content": ai_content}
+            return {"source": site_name, "url": url, "content": res.json()['choices'][0]['message']['content']}
     except: pass
     return None
 
@@ -184,29 +240,29 @@ def main():
     if 'results' not in st.session_state: st.session_state.results = []
 
     with st.sidebar:
-        st.header("⚖️ 控制面板")
-        report_type = st.selectbox("报告类型", ["日报", "周报", "月报"])
+        st.header("⚖️ 控制台")
+        report_type = st.selectbox("报告周期", ["日报", "周报", "月报"])
         selected_date = st.date_input("基准日期", datetime.now())
         include_tz = st.checkbox("包含时差 (推荐)", value=True)
         st.divider()
         sites_selected = st.multiselect("数据源", [s['name'] for s in SITES], default=[s['name'] for s in SITES])
         run = st.button("开始检索", type="primary", use_container_width=True)
 
-    st.markdown('<div class="main-title">全球贸易合规情报雷达</div>', unsafe_allow_html=True)
-    st.markdown('**专业律师版 v19.0** | 状态：Ready')
-    st.divider()
+    # 标题区域 (v17 风格)
+    st.markdown('<div class="main-header">Trade Compliance Monitor</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sub-header">全球贸易合规情报雷达 | 律师专业版 v20.0</div>', unsafe_allow_html=True)
 
     if run:
         st.session_state.results = []
         date_keys = generate_dates(selected_date, report_type, include_tz)
         
-        status = st.status("🚀 系统运行中...", expanded=True)
-        status.write("📡 第一阶段：全网链接扫描...")
+        status = st.status("📡 系统运行中...", expanded=True)
+        status.write("正在全网扫描链接...")
         
         all_candidates = []
         target_sites = [s for s in SITES if s['name'] in sites_selected]
         
-        # 1. 并发扫描列表
+        # 1. 高并发扫描
         with ThreadPoolExecutor(max_workers=10) as exe:
             futures = {exe.submit(fetch_links_step, s): s['name'] for s in target_sites}
             for f in as_completed(futures):
@@ -214,107 +270,41 @@ def main():
                 relevant = [l for l in links if any(k.lower() in l[1].lower() for k in KEYWORDS)]
                 if relevant:
                     all_candidates.extend(relevant)
-                    status.write(f"✅ {futures[f]}: 发现 {len(relevant)} 条潜在情报")
+                    status.write(f"✅ {futures[f]}: 发现 {len(relevant)} 条线索")
         
         if not all_candidates:
             status.update(label="扫描结束：无相关内容", state="error")
             st.warning("未发现包含关键词的标题。")
         else:
-            status.write(f"🧠 第二阶段：AI 深度研判 ({len(all_candidates)} 条任务)...")
+            status.write(f"🧠 AI 深度研判中 ({len(all_candidates)} 条任务)...")
+            result_container = st.container()
             
-            # 2. 并发分析详情
+            # 2. 高并发分析
             with ThreadPoolExecutor(max_workers=10) as exe:
                 futures = {exe.submit(analyze_article_step, item, date_keys): item for item in all_candidates}
-                result_container = st.container()
-                
                 for f in as_completed(futures):
                     res = f.result()
                     if res:
                         st.session_state.results.append(res)
-                        # 渲染卡片：这里使用了内联样式(inline style)，这是字体绝对清晰的关键！
+                        # 实时渲染 (使用 v17 的 HTML 结构)
                         with result_container:
                             st.markdown(f"""
-                            <div style="
-                                background-color: #FFFFFF; 
-                                border: 1px solid #E5E7EB; 
-                                border-left: 5px solid #0F172A; 
-                                border-radius: 8px; 
-                                padding: 20px; 
-                                margin-bottom: 15px; 
-                                box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
-                                <div style="
-                                    background-color: #F1F5F9; 
-                                    color: #334155; 
-                                    padding: 4px 10px; 
-                                    border-radius: 4px; 
-                                    font-size: 12px; 
-                                    font-weight: bold; 
-                                    display: inline-block; 
-                                    margin-bottom: 10px;">
-                                    {res['source']}
-                                </div>
-                                <div style="
-                                    color: #111827 !important; 
-                                    font-family: sans-serif; 
-                                    font-size: 15px; 
-                                    line-height: 1.6; 
-                                    white-space: pre-wrap;">
-                                    {res['content']}
-                                </div>
-                                <div style="margin-top: 15px; border-top: 1px solid #F3F4F6; padding-top: 10px;">
-                                    <a href="{res['url']}" target="_blank" style="
-                                        color: #2563EB; 
-                                        text-decoration: none; 
-                                        font-weight: 600; 
-                                        font-size: 14px;">
-                                        🔗 查看法律原文 &rarr;
-                                    </a>
-                                </div>
+                            <div class="result-card">
+                                <div class="source-tag">{res['source']}</div>
+                                <div class="content-text">{res['content']}</div>
+                                <a href="{res['url']}" target="_blank" class="link-btn">🔗 查看法律原文 (Source) &rarr;</a>
                             </div>
                             """, unsafe_allow_html=True)
             
             status.update(label="✅ 检索完成", state="complete", expanded=False)
-
-    # 历史结果渲染 (同样的内联样式逻辑)
+            
     elif st.session_state.results:
         for res in st.session_state.results:
             st.markdown(f"""
-            <div style="
-                background-color: #FFFFFF; 
-                border: 1px solid #E5E7EB; 
-                border-left: 5px solid #0F172A; 
-                border-radius: 8px; 
-                padding: 20px; 
-                margin-bottom: 15px; 
-                box-shadow: 0 2px 5px rgba(0,0,0,0.05);">
-                <div style="
-                    background-color: #F1F5F9; 
-                    color: #334155; 
-                    padding: 4px 10px; 
-                    border-radius: 4px; 
-                    font-size: 12px; 
-                    font-weight: bold; 
-                    display: inline-block; 
-                    margin-bottom: 10px;">
-                    {res['source']}
-                </div>
-                <div style="
-                    color: #111827 !important; 
-                    font-family: sans-serif; 
-                    font-size: 15px; 
-                    line-height: 1.6; 
-                    white-space: pre-wrap;">
-                    {res['content']}
-                </div>
-                <div style="margin-top: 15px; border-top: 1px solid #F3F4F6; padding-top: 10px;">
-                    <a href="{res['url']}" target="_blank" style="
-                        color: #2563EB; 
-                        text-decoration: none; 
-                        font-weight: 600; 
-                        font-size: 14px;">
-                        🔗 查看法律原文 &rarr;
-                    </a>
-                </div>
+            <div class="result-card">
+                <div class="source-tag">{res['source']}</div>
+                <div class="content-text">{res['content']}</div>
+                <a href="{res['url']}" target="_blank" class="link-btn">🔗 查看法律原文 (Source) &rarr;</a>
             </div>
             """, unsafe_allow_html=True)
 
