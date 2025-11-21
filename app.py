@@ -2,16 +2,19 @@ import streamlit as st
 import requests
 import warnings
 import time
+import re  # ✅ 补全了这个关键库
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from datetime import timedelta, datetime
 
+# 尝试引入穿墙库
 try:
     from curl_cffi import requests as c_requests
 except ImportError:
     import requests as c_requests
 
+# 屏蔽 SSL 警告
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings("ignore")
@@ -91,7 +94,7 @@ def normalize_title(title):
 def fetch_links_smart(site):
     """
     智能采集：
-    - VIP源：无视关键词，抓取所有长标题链接（防止漏抓隐晦的政策更新）
+    - VIP源：无视关键词，抓取所有长标题链接
     - 媒体源：必须包含MEDIA_KEYWORDS才抓取
     """
     try:
@@ -120,7 +123,7 @@ def fetch_links_smart(site):
                 
                 # === 核心分级逻辑 ===
                 if site['type'] == 'vip':
-                    # VIP: 只要标题够长看起来像新闻，直接抓，不经过滤
+                    # VIP: 只要标题够长，全抓
                     links.append((site['name'], t, full, site['engine'], site['type']))
                 else:
                     # Media: 必须包含关键词
@@ -131,9 +134,7 @@ def fetch_links_smart(site):
 
 def analyze_article_smart(item, date_keywords, target_date_objs):
     """
-    智能分析：
-    - 先用 Python 快速过滤日期（为了速度）
-    - 再用 AI 生成简报（为了质量）
+    智能分析：Python 日期初筛 + AI 终极生成
     """
     site_name, title, url, engine, site_type = item
     try:
@@ -147,8 +148,7 @@ def analyze_article_smart(item, date_keywords, target_date_objs):
             r = c_requests.get(url, impersonate="chrome120", timeout=10)
             txt = r.text
         
-        # 2. Python 日期初筛 (极大提升效率，拦截90%无效网页)
-        # 只要正文中出现了目标日期的字符串，就放行
+        # 2. Python 日期初筛
         match_hit = False
         for dk in date_keywords:
             if dk in txt:
@@ -165,7 +165,6 @@ def analyze_article_smart(item, date_keywords, target_date_objs):
         # 4. AI 终极生成
         date_range_str = ", ".join([d.strftime("%Y-%m-%d") for d in target_date_objs])
         
-        # 根据源类型微调 Prompt
         if site_type == 'vip':
             context_instruction = "这是核心监管机构信息。只要日期符合，无论是法规、声明还是执法行动，一律保留。"
         else:
@@ -220,7 +219,7 @@ def main():
         run = st.button("开始检索", type="primary", use_container_width=True)
 
     st.markdown('<div class="main-header">Trade Compliance Monitor</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="sub-header">律师专业版 v30.0 (智能全自动) | 模式：{report_type}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sub-header">律师专业版 v30.1 | 模式：{report_type}</div>', unsafe_allow_html=True)
 
     if run:
         st.session_state.results = []
