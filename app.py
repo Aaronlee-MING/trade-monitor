@@ -24,7 +24,7 @@ SILICON_KEY = "sk-lvnzrlhumujjhpzjkslhhuqjdukioscebcoeuawumtyqoqiz"
 API_URL = "https://api.siliconflow.cn/v1/chat/completions"
 MODEL_NAME = "deepseek-ai/DeepSeek-V3"
 
-# 关键词
+# 关键词 (只基于标题筛选主题，不筛日期)
 KEYWORDS = [
     "Sanction", "Trade", "Export", "Import", "Tariff", "Entity List", 
     "China", "Russia", "Control", "Violation", "Security", "Semiconductor",
@@ -48,19 +48,19 @@ SITES = [
     {"name": "📰 Foreign Policy", "url": "https://foreignpolicy.com/latest/", "engine": "curl"}
 ]
 
-# ================= 🎨 UI 设计 (v17 复刻 + 强制清晰) =================
+# ================= 🎨 UI 设计 (v17/v22 经典样式) =================
 
 st.set_page_config(page_title="Trade Compliance Monitor", page_icon="⚖️", layout="wide")
 
 st.markdown("""
 <style>
-    /* 1. 全局背景与字体 - 强制白底黑字 */
+    /* 1. 全局 - 强制白底黑字 */
     .stApp {
         background-color: #ffffff; 
         color: #1a202c;
     }
     
-    /* 2. 标题设计 - 律所衬线体风格 */
+    /* 2. 标题 - 律所风格 */
     .main-header {
         font-family: "Source Serif Pro", "Georgia", serif;
         color: #0F294D;
@@ -79,7 +79,7 @@ st.markdown("""
         padding-bottom: 1rem;
     }
 
-    /* 3. 结果卡片 - 强制配色，防止夜间模式干扰 */
+    /* 3. 结果卡片 - 强制配色 */
     .result-card {
         background-color: #F7F9FB !important; 
         border: 1px solid #E2E8F0;
@@ -90,7 +90,7 @@ st.markdown("""
         box-shadow: 0 1px 3px rgba(0,0,0,0.02);
     }
     
-    /* 4. 来源标签 */
+    /* 4. 标签 */
     .source-tag {
         background-color: #E2E8F0;
         color: #1e293b !important;
@@ -104,7 +104,7 @@ st.markdown("""
         margin-bottom: 14px;
     }
 
-    /* 5. 正文内容 - 强制深色，高对比度 */
+    /* 5. 正文 - 强制深黑 */
     .content-text {
         color: #1A202C !important;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -113,7 +113,7 @@ st.markdown("""
         white-space: pre-wrap;
     }
 
-    /* 6. 链接按钮 */
+    /* 6. 链接 */
     .link-btn {
         display: inline-block;
         margin-top: 18px;
@@ -129,31 +129,22 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 🧠 核心逻辑 (速度+质量平衡) =================
+# ================= 🧠 核心逻辑 (v23.0 修正版 - 移除Python死板过滤) =================
 
-def generate_strict_keywords(selected_date, report_type, include_tz):
-    target_dates = []
+def get_target_date_objs(selected_date, report_type, include_tz):
+    """只生成日期对象列表，不再生成字符串关键词"""
+    dates = []
     if report_type == "日报":
-        target_dates.append(selected_date)
-        if include_tz: target_dates.append(selected_date - timedelta(days=1))
+        dates = [selected_date]
+        if include_tz: dates.append(selected_date - timedelta(days=1))
     elif report_type == "周报":
-        for i in range(7): target_dates.append(selected_date - timedelta(days=i))
+        dates = [selected_date - timedelta(days=i) for i in range(8)]
     elif report_type == "月报":
-        for i in range(30): target_dates.append(selected_date - timedelta(days=i))
-
-    keywords = []
-    for d in target_dates:
-        y, m_full, m_abbr, d_str, d_pad = str(d.year), d.strftime("%B"), d.strftime("%b"), str(d.day), d.strftime("%d")
-        # 严格必须包含年份
-        keywords.extend([
-            f"{m_full} {d_str}, {y}", f"{m_abbr} {d_str}, {y}", f"{m_abbr}. {d_str}, {y}",
-            f"{y}-{m_abbr}-{d_pad}", f"{y}/{d.strftime('%m')}/{d_pad}", f"{y}-{d.strftime('%m')}-{d_pad}",
-            f"{d_str} {m_full} {y}", d.strftime("%m/%d/%Y")
-        ])
-    return list(set(keywords)), target_dates
+        dates = [selected_date - timedelta(days=i) for i in range(31)]
+    return dates
 
 def fetch_links_step(site):
-    """步骤1: 并发采集"""
+    """步骤1: 并发采集 (不变)"""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
         html = ""
@@ -175,6 +166,8 @@ def fetch_links_step(site):
         seen = set()
         for a in soup.find_all('a'):
             t, h = a.get_text(strip=True), a.get('href')
+            # 关键词初筛：只看标题里有没有 "Sanction", "Trade" 等
+            # 这一步不再检查日期，防止漏掉
             if t and len(t)>10 and h and "javascript" not in h:
                 full = urljoin(site['url'], h)
                 if full not in seen:
@@ -183,8 +176,8 @@ def fetch_links_step(site):
         return links
     except: return []
 
-def analyze_article_strict(item, date_keywords, target_date_objs):
-    """步骤2: 并发验证 + AI 裁决"""
+def analyze_article_ai_check(item, target_date_objs):
+    """步骤2: 直接交给 AI 查日期"""
     site_name, title, url, engine = item
     try:
         txt = ""
@@ -196,36 +189,40 @@ def analyze_article_strict(item, date_keywords, target_date_objs):
             r = c_requests.get(url, impersonate="chrome120", timeout=10)
             txt = r.text
         
-        # 1. Python 严格筛选 (速度层)
-        match_hit = False
-        for dk in date_keywords:
-            if dk in txt:
-                match_hit = True
-                break
-        if not match_hit: return None
-
-        # 2. 提取正文
+        # 提取全文 (不仅是 p 标签，为了获取 meta 日期)
         soup = BeautifulSoup(txt, 'html.parser')
         for s in soup(["script", "style", "nav", "footer", "aside"]): s.extract()
-        content = "\n".join([p.get_text(strip=True) for p in soup.find_all('p') if len(p.get_text(strip=True)) > 50])
-        if len(content) < 50: return None
+        # 获取前 3500 字符，足以包含标题、日期和正文开头
+        raw_text = soup.get_text(separator="\n", strip=True)[:3500]
 
-        # 3. AI 终极裁决 (质量层)
+        if len(raw_text) < 50: return None
+
+        # 构造日期范围
         date_range_str = ", ".join([d.strftime("%Y-%m-%d") for d in target_date_objs])
+
+        # === 关键升级：Prompt 不再依赖 Python 匹配 ===
         prompt = f"""
-        任务：贸易合规简报分析。
-        【日期核查】目标范围：{date_range_str}。
-        ⚠️ 必须严格核对：如果该新闻**不是**在此日期范围内发布（例如是旧闻），请直接返回 "MISMATCH"。
+        你是一个严格的新闻发布时间审核员。
         
-        若符合，请生成律师简报：
-        1. **【标题】**：(中文)
+        【审核标准】
+        目标日期范围：{date_range_str}
+        
+        请阅读下面的网页内容，找到这篇文章的**发布日期 (Published Date)** 或 **更新日期 (Updated Date)**。
+        
+        判断逻辑：
+        1. 如果文章日期**在**上述范围内（包含起始日），请生成简报。
+        2. 如果文章日期**不在**范围内（是旧闻），或者找不到明确日期，请直接返回 "MISMATCH"。
+        
+        【简报格式】(如果符合日期):
+        1. **【标题】**：(中文翻译)
         2. **【核心事实】**：(3点摘要)
-        3. **【合规提示】**：(风险建议)
+        3. **【合规提示】**：(针对中企建议)
         
-        原文：
+        【网页内容】
         来源：{site_name}
         标题：{title}
-        正文：{content[:2500]}
+        内容摘要：
+        {raw_text}
         """
         
         res = requests.post(
@@ -257,39 +254,40 @@ def main():
         run = st.button("开始精准检索", type="primary", use_container_width=True)
 
     st.markdown('<div class="main-header">Trade Compliance Monitor</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="sub-header">律师专业版 v22.0 | 模式：{report_type}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sub-header">律师专业版 v23.0 (AI 全托管日期核查) | 模式：{report_type}</div>', unsafe_allow_html=True)
 
     if run:
         st.session_state.results = []
-        date_keys, target_date_objs = generate_strict_keywords(selected_date, report_type, include_tz)
+        # 只生成日期对象，不生成关键词了
+        target_date_objs = get_target_date_objs(selected_date, report_type, include_tz)
         
-        # 进度状态栏
-        status = st.status("🚀 启动双引擎检索系统...", expanded=True)
-        status.write(f"📅 锁定日期范围: {[d.strftime('%Y-%m-%d') for d in target_date_objs]}")
+        status = st.status("🚀 启动系统...", expanded=True)
+        status.write(f"📅 目标日期范围: {[d.strftime('%Y-%m-%d') for d in target_date_objs]}")
         
         all_candidates = []
         target_sites = [s for s in SITES if s['name'] in sites_selected]
         
-        # 第一阶段：高并发采集链接
+        # 1. 采集链接 (只筛主题，不筛日期)
         with ThreadPoolExecutor(max_workers=10) as exe:
             futures = {exe.submit(fetch_links_step, s): s['name'] for s in target_sites}
             for f in as_completed(futures):
                 links = f.result()
+                # 只要标题里有 Trade/Sanction 就先抓回来
                 relevant = [l for l in links if any(k.lower() in l[1].lower() for k in KEYWORDS)]
                 if relevant:
                     all_candidates.extend(relevant)
-                    status.write(f"✅ {futures[f]}: 采集到 {len(relevant)} 条线索")
+                    status.write(f"✅ {futures[f]}: 采集到 {len(relevant)} 条相关主题线索")
         
         if not all_candidates:
-            status.update(label="未发现相关线索", state="error")
-            st.warning("今日无相关关键词更新。")
+            status.update(label="未发现相关主题线索", state="error")
+            st.warning("今日无相关关键词（制裁、贸易等）标题更新。")
         else:
-            status.write(f"🧠 进入 AI 深度验证 ({len(all_candidates)} 条待审)...")
+            status.write(f"🧠 全量提交 AI 核查日期 ({len(all_candidates)} 条任务)... 此过程可能较慢，请耐心等待。")
             result_container = st.container()
             
-            # 第二阶段：高并发 AI 分析
+            # 2. 全量 AI 核查
             with ThreadPoolExecutor(max_workers=10) as exe:
-                futures = {exe.submit(analyze_article_strict, item, date_keys, target_date_objs): item for item in all_candidates}
+                futures = {exe.submit(analyze_article_ai_check, item, target_date_objs): item for item in all_candidates}
                 found_count = 0
                 
                 for f in as_completed(futures):
@@ -297,7 +295,6 @@ def main():
                     if res:
                         found_count += 1
                         st.session_state.results.append(res)
-                        # 实时渲染 UI (内联样式确保清晰度)
                         with result_container:
                             st.markdown(f"""
                             <div class="result-card">
@@ -308,12 +305,11 @@ def main():
                             """, unsafe_allow_html=True)
             
             if found_count == 0:
-                status.update(label="检索完成：无有效情报", state="complete") # 修复了 warning 报错
-                st.info(f"已扫描 {len(all_candidates)} 条线索，但 AI 判定均为非目标日期 ({[d.strftime('%Y-%m-%d') for d in target_date_objs]}) 的旧闻。")
+                status.update(label="检索完成：无有效情报", state="complete")
+                st.info(f"已扫描 {len(all_candidates)} 条线索，经 AI 逐一核对，均不属于目标日期范围。")
             else:
                 status.update(label=f"✅ 检索完成：锁定 {found_count} 条有效情报", state="complete", expanded=False)
 
-    # 历史结果展示
     elif st.session_state.results:
         for res in st.session_state.results:
             st.markdown(f"""
