@@ -1,365 +1,377 @@
 import streamlit as st
 import requests
 import warnings
-import time
 import re
-import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from datetime import timedelta, datetime
 
-# 引入穿墙库
+# 引入抗指纹浏览器伪装库
 try:
     from curl_cffi import requests as c_requests
 except ImportError:
     import requests as c_requests
 
-# 屏蔽 SSL 警告
+# 忽略 SSL 安全警告，保持界面整洁
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings("ignore")
 
-# ================= ⚙️ 核心配置 =================
+# ================= ⚙️ 用户配置区 (User Config) =================
 
+# ⚠️ 请在此处填入你的 SiliconFlow (DeepSeek) API 密钥
+# 获取地址: https://cloud.siliconflow.cn/
 SILICON_KEY = "sk-lvnzrlhumujjhpzjkslhhuqjdukioscebcoeuawumtyqoqiz" 
+
 API_URL = "https://api.siliconflow.cn/v1/chat/completions"
 MODEL_NAME = "deepseek-ai/DeepSeek-V3"
 
-# --- 策略调整：扩充媒体关键词（不再过于严格，防止漏抓） ---
-MEDIA_KEYWORDS = [
-    "Sanction", "Export", "Import", "Trade", "Entity List", "Tariff", 
-    "Semiconductor", "Chip", "Tech", "Supply Chain", "Investment", 
-    "Blacklist", "Laundering", "Ban", "Restriction", "Investigation",
-    "Enforcement", "Violation", "China", "Russia", "Policy",
-    "制裁", "出口", "进口", "贸易", "清单", "关税", "芯片", "半导体", "供应链"
+# 关键词库 (既用于搜索，也用于高亮)
+KEYWORDS = [
+    "Sanction", "Entity List", "Tariff", "Export Control", "Supply Chain", 
+    "Semiconductor", "Chip", "Ban", "Restriction", "UFLPA", "Bis", "Ofac",
+    "制裁", "实体清单", "关税", "出口管制", "供应链", "芯片", "半导体", "黑名单"
 ]
 
-# 站点配置
-DEFAULT_SITES = [
-    # VIP: 核心政府源 (全量抓取 + AI 去除非业务信息)
-    {"name": "🇺🇸 BIS News", "url": "https://www.bis.gov/news-updates", "engine": "curl", "type": "vip"},
-    {"name": "🇺🇸 OFAC Actions", "url": "https://ofac.treasury.gov/recent-actions", "engine": "curl", "type": "vip"},
-    {"name": "🇺🇸 Commerce Press", "url": "https://www.commerce.gov/news/press-releases", "engine": "curl", "type": "vip"},
-    {"name": "🇺🇸 DOJ Press", "url": "https://www.justice.gov/news/press-releases", "engine": "curl", "type": "vip"},
-    {"name": "🇪🇺 EU Council", "url": "https://www.consilium.europa.eu/en/press/press-releases/", "engine": "curl", "type": "vip"},
-    {"name": "🇨🇳 MOFCOM (管制局)", "url": "http://aqygzj.mofcom.gov.cn/article/glxd/", "engine": "standard", "type": "vip"},
-    {"name": "🇨🇳 外交部发言人", "url": "https://www.fmprc.gov.cn/fyrbt_673021/", "engine": "standard", "type": "vip"},
-    {"name": "🇺🇸 BIS Enforcement", "url": "https://www.bis.gov/enforcement/export-violations", "engine": "curl", "type": "vip"},
+# 数据源配置 (涵盖官方 VIP 源与权威媒体)
+SITES = [
+    # VIP: 官方监管源 (权威性最高)
+    {"name": "🇺🇸 BIS News (美商务部)", "url": "https://www.bis.gov/news-updates", "engine": "curl", "type": "vip"},
+    {"name": "🇺🇸 OFAC Actions (美财政部)", "url": "https://ofac.treasury.gov/recent-actions", "engine": "curl", "type": "vip"},
+    {"name": "🇺🇸 DOJ Press (美司法部)", "url": "https://www.justice.gov/news/press-releases", "engine": "curl", "type": "vip"},
+    {"name": "🇨🇳 MOFCOM (中国商务部)", "url": "http://aqygzj.mofcom.gov.cn/article/glxd/", "engine": "standard", "type": "vip"},
+    {"name": "🇪🇺 EU Sanctions (欧盟)", "url": "https://www.consilium.europa.eu/en/press/press-releases/", "engine": "curl", "type": "vip"},
     
-    # Media: 泛读源 (扩充关键词抓取 + AI 严格关联度审核)
-    {"name": "🇬🇧 Reuters (Defense)", "url": "https://www.reuters.com/business/aerospace-defense/", "engine": "curl", "type": "media"},
+    # Media: 法律与行业情报
+    {"name": "🇬🇧 Reuters Defense", "url": "https://www.reuters.com/business/aerospace-defense/", "engine": "curl", "type": "media"},
     {"name": "🏛️ CSIS Analysis", "url": "https://www.csis.org/analysis", "engine": "curl", "type": "media"},
-    {"name": "🇺🇸 US Congress", "url": "https://www.congress.gov/search?q=%7B%22source%22%3A%22legislation%22%2C%22congress%22%3A%22118%22%7D", "engine": "curl", "type": "media"},
-    {"name": "🇭🇰 SCMP", "url": "https://www.scmp.com/news/china/diplomacy", "engine": "curl", "type": "media"},
-    {"name": "📰 Foreign Policy", "url": "https://foreignpolicy.com/latest/", "engine": "curl", "type": "media"}
+    {"name": "📰 Foreign Policy", "url": "https://foreignpolicy.com/latest/", "engine": "curl", "type": "media"},
 ]
 
-# ================= 🎨 UI 设计 (律所专业版) =================
+# ================= 🎨 律所级 UI 设计 (CSS) =================
 
-st.set_page_config(page_title="Trade Compliance Monitor", page_icon="⚖️", layout="wide")
+st.set_page_config(page_title="Global Trade Monitor", page_icon="⚖️", layout="wide")
 
 st.markdown("""
 <style>
-    /* 1. 全局 - 强制白底黑字 */
-    .stApp { background-color: #ffffff; color: #1a202c; }
+    /* 1. 整体背景与字体 - 模拟纸质文件 */
+    .stApp {
+        background-color: #f8f9fa;
+        font-family: "Times New Roman", "Source Serif Pro", serif;
+    }
     
-    /* 2. 标题 - 衬线体 */
-    .main-header { font-family: "Source Serif Pro", "Georgia", serif; color: #0F294D; font-size: 2.4rem; font-weight: 700; margin-bottom: 0.5rem; }
-    .sub-header { font-family: "Helvetica Neue", sans-serif; color: #64748b; font-size: 1rem; margin-bottom: 2.5rem; border-bottom: 1px solid #e2e8f0; padding-bottom: 1rem; }
-
-    /* 3. 卡片 - 强制配色 */
-    .result-card { background-color: #F7F9FB !important; border: 1px solid #E2E8F0; border-left: 5px solid #0F294D; border-radius: 8px; padding: 24px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }
+    /* 2. 顶部导航栏 - 海军蓝专业风 */
+    header[data-testid="stHeader"] {
+        background-color: #002b49;
+    }
     
-    /* 4. 标签 */
-    .source-tag { background-color: #E2E8F0; color: #1e293b !important; padding: 4px 10px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; display: inline-block; margin-bottom: 14px; }
-    .vip-badge { background-color: #FEF3C7; color: #92400E !important; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 800; margin-left: 8px; vertical-align: middle; }
+    /* 3. 标题样式 */
+    .main-title {
+        color: #002b49;
+        font-family: "Georgia", serif;
+        font-size: 2.8rem;
+        font-weight: 700;
+        border-bottom: 2px solid #bfa15f; /* 金色线条 */
+        padding-bottom: 10px;
+        margin-bottom: 20px;
+    }
+    .sub-title {
+        color: #555;
+        font-family: "Arial", sans-serif;
+        font-size: 1rem;
+        margin-top: -15px;
+        margin-bottom: 30px;
+    }
 
-    /* 5. 正文 - 强制深黑 */
-    .content-text { color: #1A202C !important; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 15px; line-height: 1.7; white-space: pre-wrap; }
+    /* 4. 结果卡片 - 类似彭博终端/法律简报的卡片 */
+    .report-card {
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
+        border-left: 6px solid #002b49; /* 左侧强强调色 */
+        border-radius: 4px;
+        padding: 25px;
+        margin-bottom: 20px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        transition: transform 0.2s;
+    }
+    .report-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+    }
 
-    /* 6. 链接 */
-    .link-btn { display: inline-block; margin-top: 18px; color: #2563eb !important; font-weight: 600; text-decoration: none; font-size: 0.9rem; border-bottom: 1px dotted #2563eb; }
-    .link-btn:hover { border-bottom: 1px solid #2563eb; }
+    /* 5. 标签体系 */
+    .tag-vip {
+        background-color: #002b49;
+        color: #bfa15f; /* 金色文字 */
+        padding: 4px 8px;
+        font-size: 0.75rem;
+        font-weight: bold;
+        text-transform: uppercase;
+        border-radius: 2px;
+        letter-spacing: 1px;
+    }
+    .tag-media {
+        background-color: #e2e8f0;
+        color: #475569;
+        padding: 4px 8px;
+        font-size: 0.75rem;
+        font-weight: bold;
+        border-radius: 2px;
+    }
+    .date-tag {
+        color: #888;
+        font-family: "Arial", sans-serif;
+        font-size: 0.85rem;
+        margin-left: 10px;
+    }
+
+    /* 6. 内容排版 */
+    .card-title {
+        color: #1a1a1a;
+        font-family: "Georgia", serif;
+        font-size: 1.3rem;
+        font-weight: 600;
+        margin: 12px 0;
+    }
+    .card-body {
+        color: #333;
+        font-family: "Arial", sans-serif;
+        font-size: 0.95rem;
+        line-height: 1.6;
+        white-space: pre-wrap;
+    }
+    
+    /* 7. 链接按钮 */
+    .source-link {
+        display: inline-block;
+        margin-top: 15px;
+        color: #0056b3;
+        text-decoration: none;
+        font-size: 0.9rem;
+        font-weight: 600;
+        border-bottom: 1px dotted #0056b3;
+    }
+    .source-link:hover {
+        border-bottom: 1px solid #0056b3;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 🧠 核心逻辑 =================
+# ================= 🧠 核心逻辑 (后端) =================
 
-def get_target_dates(selected_date, report_type, include_tz):
-    dates = [selected_date]
-    if report_type == "日报" and include_tz: dates.append(selected_date - timedelta(days=1))
-    elif report_type == "周报": dates = [selected_date - timedelta(days=i) for i in range(8)]
-    elif report_type == "月报": dates = [selected_date - timedelta(days=i) for i in range(31)]
-    return dates
-
-def normalize_title(title):
-    """标题指纹去重：去除标点、转小写、去除首尾空格"""
-    return re.sub(r'[^\w\s]', '', title).lower().strip()
-
-def fetch_links_step(site):
-    """
-    步骤1: 采集
-    VIP: 抓取所有链接 (不漏)
-    Media: 抓取包含扩充关键词的链接 (不过度严格)
-    """
+def fetch_site_links(site):
+    """采集器：针对不同网站使用不同的伪装策略"""
+    links = []
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36"}
-        html = ""
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        
+        # 1. 获取网页源码
         if site['engine'] == "standard":
-            resp = requests.get(site['url'], headers=headers, timeout=12, verify=False)
-            if "mofcom" in site['url']: resp.encoding = "gbk" if "gbk" in resp.text.lower() else "utf-8"
+            # 普通模式：适合简单网站（如中国商务部）
+            resp = requests.get(site['url'], headers=headers, timeout=10, verify=False)
+            if "mofcom" in site['url']: resp.encoding = "gbk" # 解决中文乱码
             html = resp.text
         else:
-            for fp in ["chrome120", "safari15_3"]:
-                try:
-                    resp = c_requests.get(site['url'], impersonate=fp, timeout=15)
-                    html = resp.text
-                    break
-                except: continue
-        
-        if not html: return []
-        soup = BeautifulSoup(html, 'html.parser')
-        links = []
-        
-        for a in soup.find_all('a'):
-            t, h = a.get_text(strip=True), a.get('href')
-            if t and len(t)>8 and h and "javascript" not in h:
-                full = urljoin(site['url'], h)
-                
-                # VIP源：全量抓取，后续由 AI 判断是否为“行政噪音”
-                if site['type'] == 'vip':
-                    links.append((site['name'], t, full, site['engine'], site['type']))
-                # Media源：使用扩充后的关键词库
-                else:
-                    if any(k.lower() in t.lower() for k in MEDIA_KEYWORDS):
-                        links.append((site['name'], t, full, site['engine'], site['type']))
-        return links
-    except: return []
+            # 穿墙模式：模拟 Chrome 120 浏览器
+            resp = c_requests.get(site['url'], impersonate="chrome120", timeout=15)
+            html = resp.text
 
-def analyze_article_final(item, target_date_objs):
-    """
-    步骤2: AI 深度审核
-    功能：日期核查 + 内容相关性核查 + 格式化输出
-    """
-    site_name, title, url, engine, site_type = item
+        # 2. 解析链接
+        soup = BeautifulSoup(html, 'html.parser')
+        for a in soup.find_all('a', href=True):
+            text = a.get_text(strip=True)
+            href = a['href']
+            
+            # 初步过滤：标题太短或无意义的不看
+            if len(text) < 5: continue
+            
+            # VIP 源全量抓取，Media 源需包含关键词
+            is_relevant = False
+            if site['type'] == 'vip':
+                is_relevant = True # 官方源全看，交给 AI 过滤
+            else:
+                if any(k.lower() in text.lower() for k in KEYWORDS):
+                    is_relevant = True
+            
+            if is_relevant:
+                full_url = urljoin(site['url'], href)
+                links.append({
+                    "source": site['name'],
+                    "title": text,
+                    "url": full_url,
+                    "type": site['type'],
+                    "engine": site['engine']
+                })
+    except Exception as e:
+        print(f"Error fetching {site['name']}: {e}")
+    return links
+
+def analyze_with_ai(article, date_scope_str):
+    """AI 分析师：DeepSeek-V3"""
     try:
         # 1. 获取正文
         txt = ""
-        if engine == "standard":
-            r = requests.get(url, headers={"User-Agent": "Chrome/120.0"}, timeout=10, verify=False)
-            if "mofcom" in url: r.encoding = "gbk"
+        if article['engine'] == "standard":
+            r = requests.get(article['url'], timeout=10, verify=False)
+            if "mofcom" in article['url']: r.encoding = "gbk"
             txt = r.text
         else:
-            r = c_requests.get(url, impersonate="chrome120", timeout=10)
+            r = c_requests.get(article['url'], impersonate="chrome120", timeout=10)
             txt = r.text
         
         soup = BeautifulSoup(txt, 'html.parser')
-        # 强力清洗：去除侧边栏、推荐阅读、页脚，防止日期混淆
-        for s in soup(["script", "style", "nav", "footer", "aside", "header", "div.related", "div.sidebar", "div.menu"]): s.extract()
-        raw_text = soup.get_text(separator="\n", strip=True)[:4000]
-        if len(raw_text) < 50: return None
+        # 移除干扰元素
+        for tag in soup(['script', 'style', 'nav', 'footer']): tag.decompose()
+        content_snippet = soup.get_text(separator="\n", strip=True)[:5000] # 限制长度
 
-        # 2. 构造日期约束
-        date_range_str = ", ".join([d.strftime("%Y-%m-%d") for d in target_date_objs])
-        
-        # 3. 构造分级 Prompt
-        if site_type == 'vip':
-            # VIP 策略：去除行政噪音
-            role_desc = """
-            这是核心政府/监管网站。
-            【保留】：法规更新、制裁行动、官方声明、政策解读。
-            【剔除】：网站维护通知、休假通知、招聘信息、无实质内容的会议议程。
-            只要是实质性内容，必须保留。
-            """
-        else:
-            # Media 策略：相关性清洗
-            role_desc = """
-            这是大众媒体新闻。
-            【保留】：涉及“制裁、实体清单、出口管制、关税、供应链禁令”的实质性报道。
-            【剔除】：普通的外交辞令、泛政治新闻、无贸易背景的军事冲突。
-            必须强相关。
-            """
-
-        system_prompt = "你是一个只输出最终简报的机器人。严禁输出思考过程，严禁输出Prompt本身，严禁输出Markdown代码块标记。"
-        
+        # 2. 构造 AI 指令
+        system_prompt = "你是一个专业的贸易合规律师。请严格按格式输出，不要废话。"
         user_prompt = f"""
-        任务：贸易合规简报生成。
-        
-        【步骤1：日期核查 (Critical)】
-        目标日期列表：[{date_range_str}]
-        请仔细在正文中寻找发布日期 (Published/Updated Date)。
-        ⚠️ 忽略“推荐阅读”或页脚版权信息中的日期。
-        如果正文日期不在目标列表中，直接输出 "MISMATCH"。
-        
-        【步骤2：内容核查】
-        文章标题：{title}
-        {role_desc}
-        如果内容属于【剔除】类别，直接输出 "MISMATCH"。
-        
-        【步骤3：输出结果】
-        如果符合要求，请严格按以下格式输出纯文本：
-        
-        【日期】YYYY-MM-DD
-        【标题】(中文翻译)
-        【核心事实】(3点摘要，客观陈述)
-        【合规提示】(针对企业的风险建议)
-        
+        请分析以下新闻是否与“国际贸易、制裁、出口管制”相关，并检查日期。
+
+        【目标日期范围】: {date_scope_str}
+        （注意：如果文章未明确标日期，但内容明显是今日或昨日发生的重大事件，也请保留）。
+
+        【判断标准】:
+        1. 必须是实质性新闻（剔除网站维护、放假通知、普通人事任免）。
+        2. 必须在目标日期范围内（或内容具有极高时效性）。
+
+        如果【不符合】，仅输出: MISMATCH
+        如果【符合】，请输出以下格式（不要使用 Markdown 代码块）：
+
+        【摘要】一句话概括核心事实（专业口吻）。
+        【风险】对企业的合规影响提示。
+        【日期】文章发布日期 (YYYY-MM-DD)
+
         ---
-        待分析文本：
-        来源：{site_name}
-        标题：{title}
-        内容摘要：{raw_text}
+        文章来源: {article['source']}
+        文章标题: {article['title']}
+        文章内容: {content_snippet}
         """
-        
-        res = requests.post(
-            API_URL,
+
+        payload = {
+            "model": "deepseek-ai/DeepSeek-V3",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0.1, # 低温模式，减少胡说八道
+            "max_tokens": 500
+        }
+
+        resp = requests.post(
+            API_URL, 
+            json=payload, 
             headers={"Authorization": f"Bearer {SILICON_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": MODEL_NAME, 
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ], 
-                "temperature": 0.1 # 低温，保证严谨
-            },
-            timeout=35
+            timeout=30
         )
         
-        if res.status_code == 200:
-            ai_reply = res.json()['choices'][0]['message']['content']
-            
-            # 后处理：防止 AI 幻觉或格式错误
-            if "MISMATCH" in ai_reply or len(ai_reply) < 10: return None
-            
-            # 清洗：去掉 ```markdown, ```, 以及可能的 "Here is the summary"
-            # 使用正则只保留 【日期】... 之后的内容
-            clean_reply = ai_reply.replace("```markdown", "").replace("```", "").strip()
-            
-            return {"source": site_name, "url": url, "content": clean_reply, "type": site_type}
-    except: pass
-    return None
+        result_text = resp.json()['choices'][0]['message']['content']
+        
+        if "MISMATCH" in result_text:
+            return None
+        
+        # 格式化返回
+        article['ai_analysis'] = result_text
+        return article
 
-# ================= 🖥️ 主界面 =================
+    except Exception as e:
+        return None
+
+# ================= 🖥️ 前端界面 (Streamlit) =================
 
 def main():
-    if 'results' not in st.session_state: st.session_state.results = []
-    if 'custom_sites' not in st.session_state: st.session_state.custom_sites = []
-
+    # 侧边栏控制台
     with st.sidebar:
-        st.header("⚖️ 控制台")
-        report_type = st.selectbox("报告周期", ["日报", "周报", "月报"])
-        selected_date = st.date_input("基准日期", datetime.now())
-        include_tz = st.checkbox("包含时差 (推荐)", value=True)
+        st.header("🎛️ Control Panel")
+        lookback_days = st.slider("回溯天数 (Lookback)", 1, 7, 1)
         
+        st.subheader("数据源状态")
+        for site in SITES:
+            st.caption(f"✅ {site['name']}")
+            
         st.divider()
-        # 自定义源
-        with st.expander("➕ 添加自定义源"):
-            new_name = st.text_input("名称", placeholder="例: EU Commission")
-            new_url = st.text_input("URL", placeholder="https://...")
-            new_type = st.selectbox("类型", ["vip (全量审)", "media (关键词审)"])
-            if st.button("添加"):
-                if new_name and new_url:
-                    st.session_state.custom_sites.append({
-                        "name": new_name, "url": new_url, 
-                        "engine": "curl", "type": "vip" if "vip" in new_type else "media"
-                    })
-                    st.success("已添加")
-        
-        st.divider()
-        # 源选择
-        all_sites = DEFAULT_SITES + st.session_state.custom_sites
-        site_names = [s['name'] for s in all_sites]
-        sites_selected = st.multiselect("数据源", site_names, default=site_names)
-        run = st.button("开始检索", type="primary", use_container_width=True)
+        st.info("系统已就绪。\n点击右侧按钮开始扫描。")
 
-    st.markdown('<div class="main-header">Trade Compliance Monitor</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="sub-header">律师专业版 v33.0 (平衡智能版) | 模式：{report_type}</div>', unsafe_allow_html=True)
+    # 主界面
+    st.markdown('<div class="main-title">Trade Compliance Monitor</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sub-title">Powered by DeepSeek-V3 | 律所专业版 | {datetime.now().strftime("%Y-%m-%d")}</div>', unsafe_allow_html=True)
 
-    if run:
-        st.session_state.results = []
-        target_date_objs = get_target_dates(selected_date, report_type, include_tz)
-        
-        status = st.status("🚀 启动系统...", expanded=True)
-        status.write(f"📅 锁定日期: {[d.strftime('%Y-%m-%d') for d in target_date_objs]}")
-        
-        # 1. 采集 (15线程高并发)
-        all_raw = []
-        target_sites_objs = [s for s in all_sites if s['name'] in sites_selected]
-        
-        with ThreadPoolExecutor(max_workers=15) as exe:
-            futures = {exe.submit(fetch_links_step, s): s['name'] for s in target_sites_objs}
-            for f in as_completed(futures):
-                links = f.result()
-                if links:
-                    all_raw.extend(links)
-                    status.write(f"✅ {futures[f]}: 捕获 {len(links)} 条潜在线索")
-        
-        # 2. 全局去重 (URL + 标题指纹)
-        unique = []
-        seen_urls = set()
-        seen_titles = set()
-        
-        for item in all_raw:
-            # item: (site, title, url, engine, type)
-            title_clean = normalize_title(item[1])
-            url = item[2]
-            
-            if url in seen_urls: continue
-            # 标题指纹去重：防止 DOJ 这种同一内容发多条链接的情况
-            if len(title_clean) > 8 and title_clean in seen_titles: continue
-            
-            seen_urls.add(url)
-            seen_titles.add(title_clean)
-            unique.append(item)
-        
-        dup_count = len(all_raw) - len(unique)
-        if dup_count > 0: status.write(f"✂️ 已剔除 {dup_count} 条重复内容")
+    # 操作按钮区
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        start_btn = st.button("🚀 开始全网扫描", type="primary", use_container_width=True)
 
-        if not unique:
-            status.update(label="无结果", state="error")
-            st.warning("今日无相关更新。")
-        else:
-            status.write(f"🧠 AI 深度核查中 ({len(unique)} 条任务)...")
-            result_container = st.container()
+    if start_btn:
+        status_box = st.status("正在执行合规扫描程序...", expanded=True)
+        
+        # 1. 计算日期范围
+        dates = [datetime.now() - timedelta(days=i) for i in range(lookback_days + 1)]
+        date_str = ", ".join([d.strftime("%Y-%m-%d") for d in dates])
+        status_box.write(f"📅 锁定日期范围: {date_str}")
+
+        # 2. 抓取链接 (多线程)
+        all_links = []
+        status_box.write("🔍 正在接入各国监管机构网站...")
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(fetch_site_links, site) for site in SITES]
+            for future in as_completed(futures):
+                links = future.result()
+                all_links.extend(links)
+        
+        status_box.write(f"📦 初步捕获线索: {len(all_links)} 条")
+
+        # 3. 去重
+        unique_links = {link['url']: link for link in all_links}.values()
+        status_box.write(f"✂️ 去重后剩余: {len(unique_links)} 条，正在排队进入 AI 审计...")
+
+        # 4. AI 分析 (核心步骤)
+        valid_results = []
+        progress_bar = st.progress(0)
+        
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            # 限制 AI 并发，防止 API 报错
+            futures = {executor.submit(analyze_with_ai, link, date_str): link for link in unique_links}
+            completed_count = 0
             
-            # 3. 分析 (15线程)
-            with ThreadPoolExecutor(max_workers=15) as exe:
-                futures = {exe.submit(analyze_article_final, item, target_date_objs): item for item in unique}
-                found_count = 0
+            for future in as_completed(futures):
+                res = future.result()
+                if res:
+                    valid_results.append(res)
                 
-                for f in as_completed(futures):
-                    res = f.result()
-                    if res:
-                        found_count += 1
-                        st.session_state.results.append(res)
-                        
-                        vip_badge = '<span class="vip-badge">CORE</span>' if res['type'] == 'vip' else ''
-                        with result_container:
-                            st.markdown(f"""
-                            <div class="result-card">
-                                <div class="source-tag">{res['source']} {vip_badge}</div>
-                                <div class="content-text">{res['content']}</div>
-                                <a href="{res['url']}" target="_blank" class="link-btn">🔗 查看法律原文 (Source) &rarr;</a>
-                            </div>
-                            """, unsafe_allow_html=True)
-            
-            if found_count == 0:
-                status.update(label="检索完成：无有效情报", state="complete")
-                st.info("经 AI 核查，线索均为旧闻、重复或非实质性内容（如放假通知/无关外交新闻）。")
-            else:
-                status.update(label=f"✅ 检索完成：锁定 {found_count} 条高质量情报", state="complete", expanded=False)
+                completed_count += 1
+                progress_bar.progress(completed_count / len(unique_links))
+        
+        status_box.update(label="扫描完成!", state="complete", expanded=False)
+        progress_bar.empty()
 
-    elif st.session_state.results:
-        for res in st.session_state.results:
-            vip_badge = '<span class="vip-badge">CORE</span>' if res.get('type') == 'vip' else ''
-            st.markdown(f"""
-            <div class="result-card">
-                <div class="source-tag">{res['source']} {vip_badge}</div>
-                <div class="content-text">{res['content']}</div>
-                <a href="{res['url']}" target="_blank" class="link-btn">🔗 查看法律原文 (Source) &rarr;</a>
-            </div>
-            """, unsafe_allow_html=True)
+        # 5. 渲染结果
+        if not valid_results:
+            st.warning("今日未发现实质性合规风险更新 (No material updates found).")
+        else:
+            st.success(f"✅ 发现 {len(valid_results)} 条高风险情报")
+            
+            for item in valid_results:
+                # 渲染漂亮的卡片
+                tag_class = "tag-vip" if item['type'] == 'vip' else "tag-media"
+                tag_text = "OFFICIAL" if item['type'] == 'vip' else "MEDIA"
+                
+                # 解析 AI 返回的文本，尝试美化
+                content_html = item['ai_analysis'].replace("\n", "<br>")
+                
+                st.markdown(f"""
+                <div class="report-card">
+                    <div>
+                        <span class="{tag_class}">{tag_text}</span>
+                        <span class="date-tag">来源: {item['source']}</span>
+                    </div>
+                    <div class="card-title">{item['title']}</div>
+                    <div class="card-body">{content_html}</div>
+                    <a href="{item['url']}" target="_blank" class="source-link">🔗 阅读全文 (Read Source) &rarr;</a>
+                </div>
+                """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
